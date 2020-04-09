@@ -614,13 +614,17 @@ void CDockManager::showEvent(QShowEvent *event)
 
 
 
-//void CDockManager::registerDockWidget(CDockWidget* Dockwidget)
+void CDockManager::registerDockWidget(CDockWidget* Dockwidget)
+{
+    d->DockWidgetsMap.insert(Dockwidget->objectName(), Dockwidget);
+}
 
 //============================================================================
 CDockAreaWidget* CDockManager::addDockWidget(DockWidgetArea area,
         CDockWidget* Dockwidget, CDockAreaWidget* DockAreaWidget)
 {
     d->DockWidgetsMap.insert(Dockwidget->objectName(), Dockwidget);
+    return CDockContainerWidget::addDockWidget(area, Dockwidget, DockAreaWidget);
 }
 
 
