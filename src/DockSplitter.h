@@ -38,7 +38,8 @@ namespace ads
 struct DockSplitterPrivate;
 
 /**
- * Splitter used internally instead of QSplitter
+ * Splitter used internally instead of QSplitter with some additional
+ * fuctionality.
  */
 class ADS_EXPORT CDockSplitter : public QSplitter
 {
@@ -60,6 +61,16 @@ public:
 	 * Returns true, if any of the internal widgets is visible
 	 */
 	bool hasVisibleContent() const;
+
+	/**
+	 * Returns first widget or nullptr if splitter is empty
+	 */
+	QWidget* firstWidget() const;
+
+	/**
+	 * Returns last widget of nullptr is splitter is empty
+	 */
+	QWidget* lastWidget() const;
 }; // class CDockSplitter
 
 } // namespace ads

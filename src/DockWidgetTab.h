@@ -53,9 +53,11 @@ class ADS_EXPORT CDockWidgetTab : public QFrame
 private:
 	DockWidgetTabPrivate* d; ///< private data (pimpl)
 	friend struct DockWidgetTabPrivate;
+	friend class CDockWidget;
+	void onDockWidgetFeaturesChanged();
 
 private slots:
-	void onDetachActionTriggered();
+	void detachDockWidget();
 
 protected:
 	virtual void mousePressEvent(QMouseEvent* ev) override;
@@ -93,11 +95,6 @@ public:
 	void setActiveTab(bool active);
 
 	/**
-	 * Returns the dock widget this title widget belongs to
-	 */
-	CDockWidget* dockWidget() const;
-
-	/**
 	 * Sets the dock area widget the dockWidget returned by dockWidget()
 	 * function belongs to.
 	 */
@@ -109,6 +106,11 @@ public:
 	 * bar widget has not been added to any dock area yet.
 	 */
 	CDockAreaWidget* dockAreaWidget() const;
+
+	/**
+	 * Returns the dock widget this title widget belongs to
+	 */
+	CDockWidget* dockWidget() const;
 
 	/**
 	 * Sets the icon to show in title bar
@@ -126,12 +128,28 @@ public:
 	QString text() const;
 
 	/**
-	 * This function returns true if the assigned dock widget is closeable
+	 * Sets the tab text
+	 */
+	void setText(const QString& title);
+
+	/**
+	 * Returns true if text is elided on the tab's title
+	 */
+	bool isTitleElided() const;
+
+	/**
+	 * This function returns true if the assigned dock widget is closable
 	 */
 	bool isClosable() const;
 
+	/**
+	* Track event ToolTipChange and set child ToolTip 
+	*/
+	virtual bool event(QEvent *e) override;
+
+
 public slots:
-	virtual void setVisible(bool visible);
+	virtual void setVisible(bool visible) override;
 
 signals:
 	void activeTabChanged();
@@ -139,6 +157,7 @@ signals:
 	void closeRequested();
 	void closeOtherTabsRequested();
 	void moved(const QPoint& GlobalPos);
+	void elidedChanged(bool elided);
 }; // class DockWidgetTab
 }
  // namespace ads

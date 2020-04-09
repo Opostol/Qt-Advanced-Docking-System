@@ -28,7 +28,8 @@
 //============================================================================
 //                                   INCLUDES
 //============================================================================
-#include <ElidingLabel.h>
+#include <FloatingDragPreview.h>
+#include "ElidingLabel.h"
 #include "DockWidgetTab.h"
 
 #include <QBoxLayout>
@@ -48,6 +49,7 @@
 #include "FloatingDockContainer.h"
 #include "DockOverlay.h"
 #include "DockManager.h"
+#include "IconProvider.h"
 
 #include <iostream>
 
@@ -55,7 +57,6 @@ namespace ads
 {
 
 using tTabLabel = CElidingLabel;
-using tCloseButton = QPushButton;
 
 /**
  * Private data class of CDockWidgetTab class (pimpl)
@@ -66,14 +67,16 @@ struct DockWidgetTabPrivate
 	CDockWidget* DockWidget;
 	QLabel* IconLabel = nullptr;
 	tTabLabel* TitleLabel;
+	QPoint GlobalDragStartMousePosition;
 	QPoint DragStartMousePosition;
 	bool IsActiveTab = false;
 	CDockAreaWidget* DockArea = nullptr;
 	eDragState DragState = DraggingInactive;
-	CFloatingDockContainer* FloatingWidget = nullptr;
+	IFloatingWidget* FloatingWidget = nullptr;
 	QIcon Icon;
-	tCloseButton* CloseButton = nullptr;
+	QAbstractButton* CloseButton = nullptr;
 	QSpacerItem* IconTextSpacer;
+	QPoint TabDragStartPosition;
 
 	/**
 	 * Private data constructor
@@ -93,20 +96,11 @@ struct DockWidgetTabPrivate
 	/**
 	 * Test function for current drag state
 	 */
-	bool isDraggingState(eDragState dragState)
+	bool isDraggingState(eDragState dragState) const
 	{
 		return this->DragState == dragState;
 	}
 
-	/**
-	 * Returns true if the given global point is inside the title area geometry
-	 * rectangle.
-	 * The position is given as global position.
-	 */
-	bool titleAreaGeometryContains(const QPoint& GlobalPos) const
-	{
-		return DockArea->titleBarGeometry().contains(DockArea->mapFromGlobal(GlobalPos));
-	}
 
 	/**
 	 * Starts floating of the dock widget that belongs to this title bar
@@ -120,7 +114,51 @@ struct DockWidgetTabPrivate
 	 */
 	bool testConfigFlag(CDockManager::eConfigFlag Flag) const
 	{
-		return DockArea->dockManager()->configFlags().testFlag(Flag);
+		return CDockManager::configFlags().testFlag(Flag);
+	}
+
+	/**
+	 * Creates the close button as QPushButton or as QToolButton
+	 */
+	QAbstractButton* createCloseButton() const
+	{
+		if (testConfigFlag(CDockManager::TabCloseButtonIsToolButton))
+		{
+			auto Button = new QToolButton();
+			Button->setAutoRaise(true);
+			return Button;
+		}
+		else
+		{
+			return new QPushButton();
+		}
+	}
+
+	template <typename T>
+	IFloatingWidget* createFloatingWidget(T* Widget, bool OpaqueUndocking)
+	{
+		if (OpaqueUndocking)
+		{
+			return new CFloatingDockContainer(Widget);
+		}
+		else
+		{
+			auto w = new CFloatingDragPreview(Widget);
+			_this->connect(w, &CFloatingDragPreview::draggingCanceled, [=]()
+			{
+				DragState = DraggingInactive;
+			});
+			return w;
+		}
+	}
+
+	/**
+	 * Saves the drag start position in global and local coordinates
+	 */
+	void saveDragStartMousePosition(const QPoint& GlobalPos)
+	{
+		GlobalDragStartMousePosition = GlobalPos;
+		DragStartMousePosition = _this->mapFromGlobal(GlobalPos);
 	}
 };
 // struct DockWidgetTabPrivate
@@ -142,18 +180,15 @@ void DockWidgetTabPrivate::createLayout()
 	TitleLabel->setText(DockWidget->windowTitle());
 	TitleLabel->setObjectName("dockWidgetTabLabel");
 	TitleLabel->setAlignment(Qt::AlignCenter);
+	_this->connect(TitleLabel, SIGNAL(elidedChanged(bool)), SIGNAL(elidedChanged(bool)));
 
-	CloseButton = new tCloseButton();
+
+	CloseButton = createCloseButton();
 	CloseButton->setObjectName("tabCloseButton");
-	// The standard icons do does not look good on high DPI screens
-	QIcon CloseIcon =  _this->style()->standardIcon(QStyle::SP_TitleBarCloseButton);
-	QPixmap normalPixmap = _this->style()->standardPixmap(QStyle::SP_TitleBarCloseButton, 0, CloseButton);
-	QPixmap disabledPixmap = internal::createTransparentPixmap(normalPixmap, 0.25);
-	CloseIcon.addPixmap(disabledPixmap, QIcon::Disabled);
-	CloseButton->setIcon(CloseIcon);
-	CloseButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-	CloseButton->setVisible(false);
-	CloseButton->setToolTip(QObject::tr("Close Tab"));
+	internal::setButtonIcon(CloseButton, QStyle::SP_TitleBarCloseButton, TabCloseIcon);
+    CloseButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    _this->onDockWidgetFeaturesChanged();
+	internal::setToolTip(CloseButton, QObject::tr("Close Tab"));
 	_this->connect(CloseButton, SIGNAL(clicked()), SIGNAL(closeRequested()));
 
 	QFontMetrics fm(TitleLabel->font());
@@ -177,11 +212,12 @@ void DockWidgetTabPrivate::createLayout()
 void DockWidgetTabPrivate::moveTab(QMouseEvent* ev)
 {
     ev->accept();
-    int left, top, right, bottom;
-    _this->getContentsMargins(&left, &top, &right, &bottom);
-    QPoint moveToPos = _this->mapToParent(ev->pos()) - DragStartMousePosition;
-    moveToPos.setY(0);
-    _this->move(moveToPos);
+    QPoint Distance = ev->globalPos() - GlobalDragStartMousePosition;
+    Distance.setY(0);
+    auto TargetPos = Distance + TabDragStartPosition;
+    TargetPos.rx() = qMax(TargetPos.x(), 0);
+    TargetPos.rx() = qMin(_this->parentWidget()->rect().right() - _this->width() + 1, TargetPos.rx());
+    _this->move(TargetPos);
     _this->raise();
 }
 
@@ -190,9 +226,9 @@ void DockWidgetTabPrivate::moveTab(QMouseEvent* ev)
 bool DockWidgetTabPrivate::startFloating(eDragState DraggingState)
 {
 	auto dockContainer = DockWidget->dockContainer();
-	qDebug() << "isFloating " << dockContainer->isFloating();
-	qDebug() << "areaCount " << dockContainer->dockAreaCount();
-	qDebug() << "widgetCount " << DockWidget->dockAreaWidget()->dockWidgetsCount();
+    ADS_PRINT("isFloating " << dockContainer->isFloating());
+    ADS_PRINT("areaCount " << dockContainer->dockAreaCount());
+    ADS_PRINT("widgetCount " << DockWidget->dockAreaWidget()->dockWidgetsCount());
 	// if this is the last dock widget inside of this floating widget,
 	// then it does not make any sense, to make it floating because
 	// it is already floating
@@ -203,34 +239,37 @@ bool DockWidgetTabPrivate::startFloating(eDragState DraggingState)
 		return false;
 	}
 
-	qDebug() << "startFloating";
+    ADS_PRINT("startFloating");
 	DragState = DraggingState;
 	QSize Size = DockArea->size();
-	CFloatingDockContainer* FloatingWidget = nullptr;
+	IFloatingWidget* FloatingWidget = nullptr;
+	bool OpaqueUndocking = CDockManager::configFlags().testFlag(CDockManager::OpaqueUndocking) ||
+		(DraggingFloatingWidget != DraggingState);
+
+	// If section widget has multiple tabs, we take only one tab
+	// If it has only one single tab, we can move the complete
+	// dock area into floating widget
 	if (DockArea->dockWidgetsCount() > 1)
 	{
-		// If section widget has multiple tabs, we take only one tab
-		FloatingWidget = new CFloatingDockContainer(DockWidget);
+		FloatingWidget = createFloatingWidget(DockWidget, OpaqueUndocking);
 	}
 	else
 	{
-		// If section widget has only one content widget, we can move the complete
-		// dock area into floating widget
-		FloatingWidget = new CFloatingDockContainer(DockArea);
+		FloatingWidget = createFloatingWidget(DockArea, OpaqueUndocking);
 	}
 
     if (DraggingFloatingWidget == DraggingState)
     {
-    	FloatingWidget->startDragging(DragStartMousePosition, Size);
+        FloatingWidget->startFloating(DragStartMousePosition, Size, DraggingFloatingWidget, _this);
     	auto Overlay = DockWidget->dockManager()->containerOverlay();
     	Overlay->setAllowedAreas(OuterDockAreas);
     	this->FloatingWidget = FloatingWidget;
     }
     else
     {
-     	FloatingWidget->initFloatingGeometry(DragStartMousePosition, Size);
+     	FloatingWidget->startFloating(DragStartMousePosition, Size, DraggingInactive, nullptr);
     }
-    DockWidget->emitTopLevelChanged(true);
+
 	return true;
 }
 
@@ -248,7 +287,7 @@ CDockWidgetTab::CDockWidgetTab(CDockWidget* DockWidget, QWidget *parent) :
 //============================================================================
 CDockWidgetTab::~CDockWidgetTab()
 {
-	qDebug() << "~CDockWidgetTab()";
+    ADS_PRINT("~CDockWidgetTab()");
 	delete d;
 }
 
@@ -259,12 +298,12 @@ void CDockWidgetTab::mousePressEvent(QMouseEvent* ev)
 	if (ev->button() == Qt::LeftButton)
 	{
 		ev->accept();
-        d->DragStartMousePosition = ev->pos();
+        d->saveDragStartMousePosition(ev->globalPos());
         d->DragState = DraggingMousePressed;
         emit clicked();
 		return;
 	}
-	QFrame::mousePressEvent(ev);
+	Super::mousePressEvent(ev);
 }
 
 
@@ -272,15 +311,32 @@ void CDockWidgetTab::mousePressEvent(QMouseEvent* ev)
 //============================================================================
 void CDockWidgetTab::mouseReleaseEvent(QMouseEvent* ev)
 {
-	// End of tab moving, emit signal
-	if (d->isDraggingState(DraggingTab) && d->DockArea)
+	if (ev->button() == Qt::LeftButton)
 	{
-		emit moved(ev->globalPos());
+		auto CurrentDragState = d->DragState;
+		d->GlobalDragStartMousePosition = QPoint();
+		d->DragStartMousePosition = QPoint();
+		d->DragState = DraggingInactive;
+
+		switch (CurrentDragState)
+		{
+		case DraggingTab:
+			// End of tab moving, emit signal
+			if (d->DockArea)
+			{
+				emit moved(ev->globalPos());
+			}
+			break;
+
+		case DraggingFloatingWidget:
+			 d->FloatingWidget->finishDragging();
+			 break;
+
+		default:; // do nothing
+		}
 	}
 
-    d->DragStartMousePosition = QPoint();
-    d->DragState = DraggingInactive;
-	QFrame::mouseReleaseEvent(ev);
+	Super::mouseReleaseEvent(ev);
 }
 
 
@@ -290,7 +346,7 @@ void CDockWidgetTab::mouseMoveEvent(QMouseEvent* ev)
     if (!(ev->buttons() & Qt::LeftButton) || d->isDraggingState(DraggingInactive))
     {
     	d->DragState = DraggingInactive;
-        QFrame::mouseMoveEvent(ev);
+        Super::mouseMoveEvent(ev);
         return;
     }
 
@@ -298,7 +354,7 @@ void CDockWidgetTab::mouseMoveEvent(QMouseEvent* ev)
     if (d->isDraggingState(DraggingFloatingWidget))
     {
         d->FloatingWidget->moveFloating();
-        QFrame::mouseMoveEvent(ev);
+        Super::mouseMoveEvent(ev);
         return;
     }
 
@@ -310,9 +366,11 @@ void CDockWidgetTab::mouseMoveEvent(QMouseEvent* ev)
     	d->moveTab(ev);
     }
 
+    auto MappedPos = mapToParent(ev->pos());
+    bool MouseOutsideBar = (MappedPos.x() < 0) || (MappedPos.x() > parentWidget()->rect().right());
     // Maybe a fixed drag distance is better here ?
-    int DragDistanceY = qAbs(d->DragStartMousePosition.y() - ev->pos().y());
-    if (DragDistanceY >= CDockManager::startDragDistance())
+    int DragDistanceY = qAbs(d->GlobalDragStartMousePosition.y() - ev->globalPos().y());
+    if (DragDistanceY >= CDockManager::startDragDistance() || MouseOutsideBar)
 	{
 		// If this is the last dock area in a dock container with only
     	// one single dock widget it does not make  sense to move it to a new
@@ -324,21 +382,38 @@ void CDockWidgetTab::mouseMoveEvent(QMouseEvent* ev)
 			return;
 		}
 
-    	// Floating is only allowed for widgets that are movable
-        if (d->DockWidget->features().testFlag(CDockWidget::DockWidgetMovable))
+
+    	// Floating is only allowed for widgets that are floatable
+		// If we do non opaque undocking, then can create the drag preview
+		// if the widget is movable.
+		auto Features = d->DockWidget->features();
+        if (Features.testFlag(CDockWidget::DockWidgetFloatable)
+        || (Features.testFlag(CDockWidget::DockWidgetMovable) && !CDockManager::testConfigFlag(CDockManager::OpaqueUndocking)))
         {
+        	// If we undock, we need to restore the initial position of this
+        	// tab because it looks strange if it remains on its dragged position
+        	if (d->isDraggingState(DraggingTab) && !CDockManager::configFlags().testFlag(CDockManager::OpaqueUndocking))
+			{
+        		parentWidget()->layout()->update();
+			}
             d->startFloating();
         }
     	return;
 	}
     else if (d->DockArea->openDockWidgetsCount() > 1
-     && (ev->pos() - d->DragStartMousePosition).manhattanLength() >= QApplication::startDragDistance()) // Wait a few pixels before start moving
+     && (ev->globalPos() - d->GlobalDragStartMousePosition).manhattanLength() >= QApplication::startDragDistance()) // Wait a few pixels before start moving
 	{
+    	// If we start dragging the tab, we save its inital position to
+    	// restore it later
+    	if (DraggingTab != d->DragState)
+    	{
+    		d->TabDragStartPosition = this->pos();
+    	}
         d->DragState = DraggingTab;
 		return;
 	}
 
-   QFrame::mouseMoveEvent(ev);
+   Super::mouseMoveEvent(ev);
 }
 
 
@@ -346,16 +421,26 @@ void CDockWidgetTab::mouseMoveEvent(QMouseEvent* ev)
 void CDockWidgetTab::contextMenuEvent(QContextMenuEvent* ev)
 {
 	ev->accept();
-	std::cout << "CDockAreaTabBar::onTabContextMenuRequested" << std::endl;
+	if (d->isDraggingState(DraggingFloatingWidget))
+	{
+		return;
+	}
 
-	d->DragStartMousePosition = ev->pos();
+	d->saveDragStartMousePosition(ev->globalPos());
 	QMenu Menu(this);
-	Menu.addAction(tr("Detach"), this, SLOT(onDetachActionTriggered()));
+
+    const bool isFloatable = d->DockWidget->features().testFlag(CDockWidget::DockWidgetFloatable);
+    const bool isNotOnlyTabInContainer =  !d->DockArea->dockContainer()->hasTopLevelDockWidget();
+
+    const bool isDetachable = isFloatable && isNotOnlyTabInContainer;
+
+	auto Action = Menu.addAction(tr("Detach"), this, SLOT(detachDockWidget()));
+    Action->setEnabled(isDetachable);
 	Menu.addSeparator();
-	auto Action = Menu.addAction(tr("Close"), this, SIGNAL(closeRequested()));
+	Action = Menu.addAction(tr("Close"), this, SIGNAL(closeRequested()));
 	Action->setEnabled(isClosable());
 	Menu.addAction(tr("Close Others"), this, SIGNAL(closeOtherTabsRequested()));
-	Menu.exec(mapToGlobal(ev->pos()));
+	Menu.exec(ev->globalPos());
 }
 
 
@@ -370,8 +455,10 @@ bool CDockWidgetTab::isActiveTab() const
 void CDockWidgetTab::setActiveTab(bool active)
 {
 	bool DockWidgetClosable = d->DockWidget->features().testFlag(CDockWidget::DockWidgetClosable);
-	bool TabHasCloseButton = d->testConfigFlag(CDockManager::ActiveTabHasCloseButton);
-	d->CloseButton->setVisible(active && DockWidgetClosable && TabHasCloseButton);
+	bool ActiveTabHasCloseButton = d->testConfigFlag(CDockManager::ActiveTabHasCloseButton);
+	bool AllTabsHaveCloseButton = d->testConfigFlag(CDockManager::AllTabsHaveCloseButton);
+	bool TabHasCloseButton = (ActiveTabHasCloseButton && active) | AllTabsHaveCloseButton;
+	d->CloseButton->setVisible(DockWidgetClosable && TabHasCloseButton);
 	if (d->IsActiveTab == active)
 	{
 		return;
@@ -383,6 +470,7 @@ void CDockWidgetTab::setActiveTab(bool active)
 	d->TitleLabel->style()->unpolish(d->TitleLabel);
 	d->TitleLabel->style()->polish(d->TitleLabel);
 	update();
+	updateGeometry();
 
 	emit activeTabChanged();
 }
@@ -423,7 +511,7 @@ void CDockWidgetTab::setIcon(const QIcon& Icon)
 		d->IconLabel = new QLabel();
 		d->IconLabel->setAlignment(Qt::AlignVCenter);
 		d->IconLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
-		d->IconLabel->setToolTip(d->TitleLabel->toolTip());
+		internal::setToolTip(d->IconLabel, d->TitleLabel->toolTip());
 		Layout->insertWidget(0, d->IconLabel, Qt::AlignVCenter);
 		Layout->insertSpacing(1, qRound(1.5 * Layout->contentsMargins().left() / 2.0));
 	}
@@ -439,7 +527,7 @@ void CDockWidgetTab::setIcon(const QIcon& Icon)
 	d->Icon = Icon;
 	if (d->IconLabel)
 	{
-		d->IconLabel->setPixmap(Icon.pixmap(this->windowHandle(), QSize(16, 16)));
+		d->IconLabel->setPixmap(Icon.pixmap(style()->pixelMetric(QStyle::PM_SmallIconSize, nullptr, this)));
 		d->IconLabel->setVisible(true);
 	}
 }
@@ -465,9 +553,10 @@ void CDockWidgetTab::mouseDoubleClickEvent(QMouseEvent *event)
 	// If this is the last dock area in a dock container it does not make
 	// sense to move it to a new floating widget and leave this one
 	// empty
-	if (!d->DockArea->dockContainer()->isFloating() || d->DockArea->dockWidgetsCount() > 1)
+	if ((!d->DockArea->dockContainer()->isFloating() || d->DockArea->dockWidgetsCount() > 1)
+		&& d->DockWidget->features().testFlag(CDockWidget::DockWidgetFloatable))
 	{
-		d->DragStartMousePosition = event->pos();
+		d->saveDragStartMousePosition(event->globalPos());
 		d->startFloating(DraggingInactive);
 	}
 
@@ -484,6 +573,19 @@ void CDockWidgetTab::setVisible(bool visible)
 
 
 //============================================================================
+void CDockWidgetTab::setText(const QString& title)
+{
+	d->TitleLabel->setText(title);
+}
+
+bool CDockWidgetTab::isTitleElided() const
+{
+	return d->TitleLabel->isElided();
+}
+
+
+
+//============================================================================
 bool CDockWidgetTab::isClosable() const
 {
 	return d->DockWidget && d->DockWidget->features().testFlag(CDockWidget::DockWidgetClosable);
@@ -491,13 +593,45 @@ bool CDockWidgetTab::isClosable() const
 
 
 //===========================================================================
-void CDockWidgetTab::onDetachActionTriggered()
+void CDockWidgetTab::detachDockWidget()
 {
-	d->DragStartMousePosition = mapFromGlobal(QCursor::pos());
+	if (!d->DockWidget->features().testFlag(CDockWidget::DockWidgetFloatable))
+	{
+		return;
+	}
+
+	d->saveDragStartMousePosition(QCursor::pos());
 	d->startFloating(DraggingInactive);
 }
 
-} // namespace ads
 
+//============================================================================
+bool CDockWidgetTab::event(QEvent *e)
+{
+#ifndef QT_NO_TOOLTIP
+	if (e->type() == QEvent::ToolTipChange)
+	{
+		const auto text = toolTip();
+		d->TitleLabel->setToolTip(text);
+	}
+#endif
+	return Super::event(e);
+}
+
+
+//============================================================================
+void CDockWidgetTab::onDockWidgetFeaturesChanged()
+{
+	auto Features = d->DockWidget->features();
+	auto SizePolicy = d->CloseButton->sizePolicy();
+	SizePolicy.setRetainSizeWhenHidden(Features.testFlag(CDockWidget::DockWidgetClosable)
+		&& d->testConfigFlag(CDockManager::RetainTabSizeWhenCloseButtonHidden));
+	d->CloseButton->setSizePolicy(SizePolicy);
+}
+
+
+
+
+} // namespace ads
 //---------------------------------------------------------------------------
 // EOF DockWidgetTab.cpp

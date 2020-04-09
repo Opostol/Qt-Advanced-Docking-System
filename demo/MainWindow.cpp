@@ -50,6 +50,19 @@
 #include <QWidgetAction>
 #include <QComboBox>
 #include <QInputDialog>
+#include <QRubberBand>
+#include <QPlainTextEdit>
+#include <QTableWidget>
+#include <QScreen>
+#include <QStyle>
+#include <QMessageBox>
+#include <QMenu>
+#include <QToolButton>
+
+
+#ifdef Q_OS_WIN
+#include <QAxWidget>
+#endif
 
 #include <QMap>
 #include <QElapsedTimer>
@@ -57,6 +70,10 @@
 #include "DockManager.h"
 #include "DockWidget.h"
 #include "DockAreaWidget.h"
+#include "DockAreaTitleBar.h"
+#include "DockAreaTabBar.h"
+#include "FloatingDockContainer.h"
+#include "DockComponentsFactory.h"
 
 
 //============================================================================
@@ -88,6 +105,63 @@ static ads::CDockWidget* createLongTextLabelDockWidget(QMenu* ViewMenu)
 }
 
 
+/**
+ * Function returns a features string with closable (c), movable (m) and floatable (f)
+ * features. i.e. The following string is for a not closable but movable and floatable
+ * widget: c- m+ f+
+ */
+static QString featuresString(ads::CDockWidget* DockWidget)
+{
+	auto f = DockWidget->features();
+	return QString("c%1 m%2 f%3")
+		.arg(f.testFlag(ads::CDockWidget::DockWidgetClosable) ? "+" : "-")
+		.arg(f.testFlag(ads::CDockWidget::DockWidgetMovable) ? "+" : "-")
+		.arg(f.testFlag(ads::CDockWidget::DockWidgetFloatable) ? "+" : "-");
+}
+
+
+/**
+ * Appends the string returned by featuresString() to the window title of
+ * the given DockWidget
+ */
+static void appendFeaturStringToWindowTitle(ads::CDockWidget* DockWidget)
+{
+	DockWidget->setWindowTitle(DockWidget->windowTitle()
+		+  QString(" (%1)").arg(featuresString(DockWidget)));
+}
+
+/**
+ * Helper function to create an SVG icon
+ */
+static QIcon svgIcon(const QString& File)
+{
+	// This is a workaround, because in item views SVG icons are not
+	// properly scaled an look blurry or pixelate
+	QIcon SvgIcon(File);
+	SvgIcon.addPixmap(SvgIcon.pixmap(92));
+	return SvgIcon;
+}
+
+
+//============================================================================
+class CCustomComponentsFactory : public ads::CDockComponentsFactory
+{
+public:
+	using Super = ads::CDockComponentsFactory;
+	ads::CDockAreaTitleBar* createDockAreaTitleBar(ads::CDockAreaWidget* DockArea) const override
+	{
+		auto TitleBar = new ads::CDockAreaTitleBar(DockArea);
+		auto CustomButton = new QToolButton(DockArea);
+		CustomButton->setToolTip(QObject::tr("Help"));
+		CustomButton->setIcon(svgIcon(":/adsdemo/images/help_outline.svg"));
+		CustomButton->setAutoRaise(true);
+		int Index = TitleBar->indexOf(TitleBar->button(ads::TitleBarButtonTabsMenu));
+		TitleBar->insertWidget(Index + 1, CustomButton);
+		return TitleBar;
+	}
+};
+
+
 //============================================================================
 static ads::CDockWidget* createCalendarDockWidget(QMenu* ViewMenu)
 {
@@ -96,6 +170,7 @@ static ads::CDockWidget* createCalendarDockWidget(QMenu* ViewMenu)
 	ads::CDockWidget* DockWidget = new ads::CDockWidget(QString("Calendar %1").arg(CalendarCount++));
 	DockWidget->setWidget(w);
 	DockWidget->setToggleViewActionMode(ads::CDockWidget::ActionModeShow);
+	DockWidget->setIcon(svgIcon(":/adsdemo/images/date_range.svg"));
 	ViewMenu->addAction(DockWidget->toggleViewAction());
 	return DockWidget;
 }
@@ -110,11 +185,98 @@ static ads::CDockWidget* createFileSystemTreeDockWidget(QMenu* ViewMenu)
 	QFileSystemModel* m = new QFileSystemModel(w);
 	m->setRootPath(QDir::currentPath());
 	w->setModel(m);
-	ads::CDockWidget* DockWidget = new ads::CDockWidget(QString("Filesystem %1").arg(FileSystemCount++));
+	ads::CDockWidget* DockWidget = new ads::CDockWidget(QString("Filesystem %1")
+		.arg(FileSystemCount++));
 	DockWidget->setWidget(w);
 	ViewMenu->addAction(DockWidget->toggleViewAction());
     return DockWidget;
 }
+
+//============================================================================
+static ads::CDockWidget* createEditorWidget(QMenu* ViewMenu)
+{
+	static int EditorCount = 0;
+	QPlainTextEdit* w = new QPlainTextEdit();
+	w->setPlaceholderText("This is an editor. If you close the editor, it will be "
+		"deleted. Enter your text here.");
+	w->setStyleSheet("border: none");
+	ads::CDockWidget* DockWidget = new ads::CDockWidget(QString("Editor %1").arg(EditorCount++));
+	DockWidget->setWidget(w);
+	DockWidget->setIcon(svgIcon(":/adsdemo/images/edit.svg"));
+	DockWidget->setFeature(ads::CDockWidget::CustomCloseHandling, true);
+	ViewMenu->addAction(DockWidget->toggleViewAction());
+
+	QMenu* OptionsMenu = new QMenu(DockWidget);
+	OptionsMenu->setTitle(QObject::tr("Options"));
+	OptionsMenu->setToolTip(OptionsMenu->title());
+	OptionsMenu->setIcon(svgIcon(":/adsdemo/images/custom-menu-button.svg"));
+	auto MenuAction = OptionsMenu->menuAction();
+	// The object name of the action will be set for the QToolButton that
+	// is created in the dock area title bar. You can use this name for CSS
+	// styling
+	MenuAction->setObjectName("optionsMenu");
+	DockWidget->setTitleBarActions({OptionsMenu->menuAction()});
+	auto a = OptionsMenu->addAction(QObject::tr("Clear Editor"));
+	w->connect(a, SIGNAL(triggered()), SLOT(clear()));
+
+	return DockWidget;
+}
+
+
+//===========================================================================
+/**
+ * Custom QTableWidget with a minimum size hint to test CDockWidget
+ * setMinimumSizeHintMode() function of CDockWidget
+ */
+class CMinSizeTableWidget : public QTableWidget
+{
+public:
+	using QTableWidget::QTableWidget;
+	virtual QSize minimumSizeHint() const override
+	{
+		return QSize(300, 100);
+	}
+};
+
+
+//============================================================================
+static ads::CDockWidget* createTableWidget(QMenu* ViewMenu)
+{
+	static int TableCount = 0;
+	auto w = new CMinSizeTableWidget();
+	ads::CDockWidget* DockWidget = new ads::CDockWidget(QString("Table %1").arg(TableCount++));
+	static int colCount = 5;
+	static int rowCount = 30;
+	w->setColumnCount(colCount);
+	w->setRowCount(rowCount);
+	for (int col = 0; col < colCount; ++col)
+	{
+	  w->setHorizontalHeaderItem(col, new QTableWidgetItem(QString("Col %1").arg(col+1)));
+	  for (int row = 0; row < rowCount; ++row)
+	  {
+		 w->setItem(row, col, new QTableWidgetItem(QString("T %1-%2").arg(row + 1).arg(col+1)));
+	  }
+	}
+	DockWidget->setWidget(w);
+	DockWidget->setIcon(svgIcon(":/adsdemo/images/grid_on.svg"));
+	DockWidget->setMinimumSizeHintMode(ads::CDockWidget::MinimumSizeHintFromContent);
+	ViewMenu->addAction(DockWidget->toggleViewAction());
+	return DockWidget;
+}
+
+
+#ifdef Q_OS_WIN
+//============================================================================
+static ads::CDockWidget* createActiveXWidget(QMenu* ViewMenu, QWidget* parent = nullptr)
+{
+   static int ActiveXCount = 0;
+   QAxWidget* w = new QAxWidget("{6bf52a52-394a-11d3-b153-00c04f79faa6}", parent);
+   ads::CDockWidget* DockWidget = new ads::CDockWidget(QString("Active X %1").arg(ActiveXCount++));
+   DockWidget->setWidget(w);
+   ViewMenu->addAction(DockWidget->toggleViewAction());
+   return DockWidget;
+}
+#endif
 
 
 //============================================================================
@@ -127,7 +289,7 @@ struct MainWindowPrivate
 	Ui::MainWindow ui;
 	QAction* SavePerspectiveAction = nullptr;
 	QWidgetAction* PerspectiveListAction = nullptr;
-	QComboBox* PerspectiveComboBox = nullptr;;
+	QComboBox* PerspectiveComboBox = nullptr;
 	ads::CDockManager* DockManager = nullptr;
 
 	MainWindowPrivate(CMainWindow* _public) : _this(_public) {}
@@ -163,21 +325,30 @@ struct MainWindowPrivate
 	void restorePerspectives();
 };
 
-
 //============================================================================
 void MainWindowPrivate::createContent()
 {
 	// Test container docking
 	QMenu* ViewMenu = ui.menuView;
 	auto DockWidget = createCalendarDockWidget(ViewMenu);
-	DockWidget->setIcon(_this->style()->standardIcon(QStyle::SP_DialogOpenButton));
 	DockWidget->setFeature(ads::CDockWidget::DockWidgetClosable, false);
-	DockManager->addDockWidget(ads::LeftDockWidgetArea, DockWidget);
+	DockWidget->setFeature(ads::CDockWidget::DockWidgetMovable, false);
+	DockWidget->setFeature(ads::CDockWidget::DockWidgetFloatable, false);
+	auto SpecialDockArea = DockManager->addDockWidget(ads::LeftDockWidgetArea, DockWidget);
+
+	// For this Special Dock Area we want to avoid dropping on the center of it (i.e. we don't want this widget to be ever tabbified):
+	{
+		SpecialDockArea->setAllowedAreas(ads::OuterDockAreas);
+		//SpecialDockArea->setAllowedAreas({ads::LeftDockWidgetArea, ads::RightDockWidgetArea}); // just for testing
+	}
+
 	DockManager->addDockWidget(ads::LeftDockWidgetArea, createLongTextLabelDockWidget(ViewMenu));
 	auto FileSystemWidget = createFileSystemTreeDockWidget(ViewMenu);
 	auto ToolBar = FileSystemWidget->createDefaultToolBar();
 	ToolBar->addAction(ui.actionSaveState);
 	ToolBar->addAction(ui.actionRestoreState);
+	FileSystemWidget->setFeature(ads::CDockWidget::DockWidgetFloatable, false);
+	appendFeaturStringToWindowTitle(FileSystemWidget);
 	DockManager->addDockWidget(ads::BottomDockWidgetArea, FileSystemWidget);
 
 	FileSystemWidget = createFileSystemTreeDockWidget(ViewMenu);
@@ -185,28 +356,72 @@ void MainWindowPrivate::createContent()
 	ToolBar->addAction(ui.actionSaveState);
 	ToolBar->addAction(ui.actionRestoreState);
 	FileSystemWidget->setFeature(ads::CDockWidget::DockWidgetMovable, false);
+	FileSystemWidget->setFeature(ads::CDockWidget::DockWidgetFloatable, false);
+	appendFeaturStringToWindowTitle(FileSystemWidget);
+
+	// Test custom factory - we inject a help button into the title bar
+	ads::CDockComponentsFactory::setFactory(new CCustomComponentsFactory());
 	auto TopDockArea = DockManager->addDockWidget(ads::TopDockWidgetArea, FileSystemWidget);
+	ads::CDockComponentsFactory::resetDefaultFactory();
+
+	// We create a calendar widget and clear all flags to prevent the dock area
+	// from closing
 	DockWidget = createCalendarDockWidget(ViewMenu);
 	DockWidget->setFeature(ads::CDockWidget::DockWidgetClosable, false);
-	DockManager->addDockWidget(ads::CenterDockWidgetArea, DockWidget, TopDockArea);
+	DockWidget->setFeature(ads::CDockWidget::DockWidgetMovable, false);
+	DockWidget->setFeature(ads::CDockWidget::DockWidgetFloatable, false);
+	DockWidget->setTabToolTip(QString("Tab ToolTip\nHodie est dies magna"));
+	auto DockArea = DockManager->addDockWidget(ads::CenterDockWidgetArea, DockWidget, TopDockArea);
+
+	// Now we add a custom button to the dock area title bar that will create
+	// new editor widgets when clicked
+	auto CustomButton = new QToolButton(DockArea);
+	CustomButton->setToolTip(QObject::tr("Create Editor"));
+	CustomButton->setIcon(svgIcon(":/adsdemo/images/plus.svg"));
+	CustomButton->setAutoRaise(true);
+	auto TitleBar = DockArea->titleBar();
+	int Index = TitleBar->indexOf(TitleBar->tabBar());
+	TitleBar->insertWidget(Index + 1, CustomButton);
+	QObject::connect(CustomButton, &QToolButton::clicked, [=]()
+	{
+		auto DockWidget = createEditorWidget(ui.menuView);
+		DockWidget->setFeature(ads::CDockWidget::DockWidgetDeleteOnClose, true);
+		DockManager->addDockWidgetTabToArea(DockWidget, DockArea);
+		_this->connect(DockWidget, SIGNAL(closeRequested()), SLOT(onEditorCloseRequested()));
+	});
 
 	// Test dock area docking
 	auto RighDockArea = DockManager->addDockWidget(ads::RightDockWidgetArea, createLongTextLabelDockWidget(ViewMenu), TopDockArea);
 	DockManager->addDockWidget(ads::TopDockWidgetArea, createLongTextLabelDockWidget(ViewMenu), RighDockArea);
 	auto BottomDockArea = DockManager->addDockWidget(ads::BottomDockWidgetArea, createLongTextLabelDockWidget(ViewMenu), RighDockArea);
-	DockManager->addDockWidget(ads::RightDockWidgetArea, createLongTextLabelDockWidget(ViewMenu), RighDockArea);
+	DockManager->addDockWidget(ads::CenterDockWidgetArea, createLongTextLabelDockWidget(ViewMenu), RighDockArea);
 	DockManager->addDockWidget(ads::CenterDockWidgetArea, createLongTextLabelDockWidget(ViewMenu), BottomDockArea);
 
-    //Internal dockContainer test
-    DockWidget = new ads::CDockWidget("Container");
-    ads::CDockContainerWidget* w = new ads::CDockContainerWidget(DockManager, DockManager);
-    DockWidget->setWidget(w);
-    DockWidget->setObjectName(DockWidget->windowTitle());
-    DockWidget->setFeatures(DockWidget->features().setFlag(ads::CDockWidget::DockWidgetClosable, false));
-    DockManager->addDockWidget(ads::CenterDockWidgetArea, DockWidget, BottomDockArea);
+        //Internal dockContainer test
+        DockWidget = new ads::CDockWidget("Container");
+        ads::CDockContainerWidget* w = new ads::CDockContainerWidget(DockManager, DockManager);
+        DockWidget->setWidget(w);
+        DockWidget->setObjectName(DockWidget->windowTitle());
+        DockWidget->setFeatures(DockWidget->features().setFlag(ads::CDockWidget::DockWidgetClosable, false));
+        DockManager->addDockWidget(ads::CenterDockWidgetArea, DockWidget, BottomDockArea);
 
-    w->addDockWidget(ads::CenterDockWidgetArea, createLongTextLabelDockWidget(ViewMenu));
+        w->addDockWidget(ads::CenterDockWidgetArea, createLongTextLabelDockWidget(ViewMenu));
 
+    auto Action = ui.menuView->addAction(QString("Set %1 floating").arg(DockWidget->windowTitle()));
+    DockWidget->connect(Action, SIGNAL(triggered()), SLOT(setFloating()));
+
+#ifdef Q_OS_WIN
+    if (!DockManager->configFlags().testFlag(ads::CDockManager::OpaqueUndocking))
+    {
+    	DockManager->addDockWidget(ads::CenterDockWidgetArea, createActiveXWidget(ViewMenu), RighDockArea);
+    }
+#endif
+
+	for (auto DockWidget : DockManager->dockWidgetsMap())
+	{
+		_this->connect(DockWidget, SIGNAL(viewToggled(bool)), SLOT(onViewToggled(bool)));
+		_this->connect(DockWidget, SIGNAL(visibilityChanged(bool)), SLOT(onViewVisibilityChanged(bool)));
+        }
 }
 
 
@@ -214,11 +429,13 @@ void MainWindowPrivate::createContent()
 void MainWindowPrivate::createActions()
 {
 	ui.toolBar->addAction(ui.actionSaveState);
-	ui.actionSaveState->setIcon(_this->style()->standardIcon(QStyle::SP_DialogSaveButton));
+	ui.toolBar->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+	ui.actionSaveState->setIcon(svgIcon(":/adsdemo/images/save.svg"));
 	ui.toolBar->addAction(ui.actionRestoreState);
-	ui.actionRestoreState->setIcon(_this->style()->standardIcon(QStyle::SP_DialogOpenButton));
+	ui.actionRestoreState->setIcon(svgIcon(":/adsdemo/images/restore.svg"));
 
-	SavePerspectiveAction = new QAction("Save Perspective", _this);
+	SavePerspectiveAction = new QAction("Create Perspective", _this);
+	SavePerspectiveAction->setIcon(svgIcon(":/adsdemo/images/picture_in_picture.svg"));
 	_this->connect(SavePerspectiveAction, SIGNAL(triggered()), SLOT(savePerspective()));
 	PerspectiveListAction = new QWidgetAction(_this);
 	PerspectiveComboBox = new QComboBox(_this);
@@ -228,6 +445,16 @@ void MainWindowPrivate::createActions()
 	ui.toolBar->addSeparator();
 	ui.toolBar->addAction(PerspectiveListAction);
 	ui.toolBar->addAction(SavePerspectiveAction);
+
+	QAction* a = ui.toolBar->addAction("Create Editor");
+	a->setToolTip("Creates floating dynamic dockable editor windows that are deleted on close");
+	a->setIcon(svgIcon(":/adsdemo/images/note_add.svg"));
+	_this->connect(a, SIGNAL(triggered()), SLOT(createEditor()));
+
+	a = ui.toolBar->addAction("Create Table");
+	a->setToolTip("Creates floating dynamic dockable table with millions of entries");
+	a->setIcon(svgIcon(":/adsdemo/images/grid_on.svg"));
+	_this->connect(a, SIGNAL(triggered()), SLOT(createTable()));
 }
 
 
@@ -278,23 +505,62 @@ CMainWindow::CMainWindow(QWidget *parent) :
 {
 	using namespace ads;
 	d->ui.setupUi(this);
+
 	d->createActions();
+
+	// uncomment the following line if the tab close button should be
+	// a QToolButton instead of a QPushButton
+	// CDockManager::setConfigFlags(CDockManager::configFlags() | CDockManager::TabCloseButtonIsToolButton);
+
+    // uncomment the following line if you want to use opaque undocking and
+	// opaque splitter resizing
+    // CDockManager::setConfigFlags(CDockManager::DefaultOpaqueConfig);
+
+    // uncomment the following line if you want a fixed tab width that does
+	// not change if the visibility of the close button changes
+    //CDockManager::setConfigFlag(CDockManager::RetainTabSizeWhenCloseButtonHidden, true);
+
+	// uncomment the following line if you don't want close button on DockArea's title bar
+	//CDockManager::setConfigFlag(CDockManager::DockAreaHasCloseButton, false);
+
+	// uncomment the following line if you don't want undock button on DockArea's title bar
+	//CDockManager::setConfigFlag(CDockManager::DockAreaHasUndockButton, false);
+
+	// uncomment the following line if you don't want tabs menu button on DockArea's title bar
+	//CDockManager::setConfigFlag(CDockManager::DockAreaHasTabsMenuButton, false);
+
+	// uncomment the following line if you don't want disabled buttons to appear on DockArea's title bar
+	//CDockManager::setConfigFlag(CDockManager::DockAreaHideDisabledButtons, true);
+
+	// uncomment the following line if you want to show tabs menu button on DockArea's title bar only when there are more than one tab and at least of them has elided title
+	//CDockManager::setConfigFlag(CDockManager::DockAreaDynamicTabsMenuButtonVisibility, true);
+
+	// uncomment the following line if you want floating container to always show application title instead of active dock widget's title
+	//CDockManager::setConfigFlag(CDockManager::FloatingContainerHasWidgetTitle, false);
+
+	// uncomment the following line if you want floating container to show active dock widget's icon instead of always showing application icon
+	//CDockManager::setConfigFlag(CDockManager::FloatingContainerHasWidgetIcon, true);
 
 	// Now create the dock manager and its content
 	d->DockManager = new CDockManager(this);
 
-	// Uncomment the following line to have the old style where the dock
+	// uncomment the following line to have the old style where the dock
 	// area close button closes the active tab
-	//d->DockManager->setConfigFlags({
-	//	CDockManager::DockAreaHasCloseButton | CDockManager::DockAreaCloseButtonClosesTab});
+	// CDockManager::setConfigFlags({CDockManager::DockAreaHasCloseButton
+	//	| CDockManager::DockAreaCloseButtonClosesTab});
 	connect(d->PerspectiveComboBox, SIGNAL(activated(const QString&)),
 		d->DockManager, SLOT(openPerspective(const QString&)));
 
 	d->createContent();
-	// Default window geometry
-	resize(800, 600);
 
-    d->restoreState();
+	// Default window geometry - center on screen
+    resize(1280, 720);
+    setGeometry(QStyle::alignedRect(
+        Qt::LeftToRight, Qt::AlignCenter, frameSize(),
+        QGuiApplication::primaryScreen()->availableGeometry()
+    ));
+
+	//d->restoreState();
 	d->restorePerspectives();
 }
 
@@ -346,5 +612,66 @@ void CMainWindow::savePerspective()
 	d->PerspectiveComboBox->setCurrentText(PerspectiveName);
 
 	d->savePerspectives();
+}
+
+
+//============================================================================
+void CMainWindow::onViewToggled(bool Open)
+{
+	auto DockWidget = qobject_cast<ads::CDockWidget*>(sender());
+	if (!DockWidget)
+	{
+		return;
+	}
+
+	qDebug() << DockWidget->objectName() << " viewToggled(" << Open << ")";
+}
+
+
+//============================================================================
+void CMainWindow::onViewVisibilityChanged(bool Visible)
+{
+	auto DockWidget = qobject_cast<ads::CDockWidget*>(sender());
+    if (!DockWidget)
+    {
+        return;
+    }
+
+    qDebug() << DockWidget->objectName() << " visibilityChanged(" << Visible << ")";
+}
+
+
+//============================================================================
+void CMainWindow::createEditor()
+{
+	auto DockWidget = createEditorWidget(d->ui.menuView);
+	DockWidget->setFeature(ads::CDockWidget::DockWidgetDeleteOnClose, true);
+	auto FloatingWidget = d->DockManager->addDockWidgetFloating(DockWidget);
+    FloatingWidget->move(QPoint(20, 20));
+    connect(DockWidget, SIGNAL(closeRequested()), SLOT(onEditorCloseRequested()));
+}
+
+
+//============================================================================
+void CMainWindow::onEditorCloseRequested()
+{
+	auto DockWidget = qobject_cast<ads::CDockWidget*>(sender());
+	int Result = QMessageBox::question(this, "Close Editor", QString("Editor %1 "
+		"contains unsaved changes? Would you like to close it?")
+		.arg(DockWidget->windowTitle()));
+	if (QMessageBox::Yes == Result)
+	{
+		DockWidget->closeDockWidget();
+	}
+}
+
+
+//============================================================================
+void CMainWindow::createTable()
+{
+	auto DockWidget = createTableWidget(d->ui.menuView);
+	DockWidget->setFeature(ads::CDockWidget::DockWidgetDeleteOnClose, true);
+	auto FloatingWidget = d->DockManager->addDockWidgetFloating(DockWidget);
+    FloatingWidget->move(QPoint(40, 40));
 }
 

@@ -52,7 +52,6 @@ struct DockOverlayPrivate
 	DockWidgetAreas AllowedAreas = InvalidDockWidgetArea;
 	CDockOverlayCross* Cross;
 	QPointer<QWidget> TargetWidget;
-	QRect TargetRect;
 	DockWidgetArea LastLocation = InvalidDockWidgetArea;
 	bool DropPreviewEnabled = true;
 	CDockOverlay::eMode Mode = CDockOverlay::ModeDockAreaOverlay;
@@ -132,6 +131,21 @@ struct DockOverlayCrossPrivate
 		return Color;
 	}
 
+    //============================================================================
+    /**
+     * Helper function that returns the drop indicator width depending on the
+     * operating system
+     */
+    qreal dropIndicatiorWidth(QLabel* l) const
+    {
+    #ifdef Q_OS_LINUX
+        Q_UNUSED(l)
+        return 40;
+    #else
+        return static_cast<qreal>(l->fontMetrics().height()) * 3.f;
+    #endif
+    }
+
 
 	//============================================================================
 	QWidget* createDropIndicatorWidget(DockWidgetArea DockWidgetArea,
@@ -140,7 +154,7 @@ struct DockOverlayCrossPrivate
 		QLabel* l = new QLabel();
 		l->setObjectName("DockWidgetAreaLabel");
 
-		const qreal metric = static_cast<qreal>(l->fontMetrics().height()) * 3.f;
+        const qreal metric = dropIndicatiorWidth(l);
 		const QSizeF size(metric, metric);
 
 		l->setPixmap(createHighDpiDropIndicatorPixmap(size, DockWidgetArea, Mode));
@@ -154,7 +168,7 @@ struct DockOverlayCrossPrivate
 	void updateDropIndicatorIcon(QWidget* DropIndicatorWidget)
 	{
 		QLabel* l = qobject_cast<QLabel*>(DropIndicatorWidget);
-		const qreal metric = static_cast<qreal>(l->fontMetrics().height()) * 3.f;
+        const qreal metric = dropIndicatiorWidth(l);
 		const QSizeF size(metric, metric);
 
 		int Area = l->property("dockWidgetArea").toInt();
@@ -168,7 +182,11 @@ struct DockOverlayCrossPrivate
 		QColor borderColor = iconColor(CDockOverlayCross::FrameColor);
 		QColor backgroundColor = iconColor(CDockOverlayCross::WindowBackgroundColor);
 
+#if QT_VERSION >= 0x050600
 		double DevicePixelRatio = _this->window()->devicePixelRatioF();
+#else
+        double DevicePixelRatio = _this->window()->devicePixelRatio();
+#endif
 		QSizeF PixmapSize = size * DevicePixelRatio;
 		QPixmap pm(PixmapSize.toSize());
 		pm.fill(QColor(0, 0, 0, 0));
@@ -314,7 +332,11 @@ CDockOverlay::CDockOverlay(QWidget* parent, eMode Mode) :
 {
 	d->Mode = Mode;
 	d->Cross = new CDockOverlayCross(this);
+#ifdef Q_OS_LINUX
+	setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::X11BypassWindowManagerHint);
+#else
 	setWindowFlags(Qt::Tool | Qt::FramelessWindowHint);
+#endif
 	setWindowOpacity(1);
 	setWindowTitle("DockOverlay");
 	setAttribute(Qt::WA_NoSystemBackground);
@@ -358,18 +380,33 @@ DockWidgetArea CDockOverlay::dropAreaUnderCursor() const
 		return Result;
 	}
 
-	CDockAreaWidget* DockArea = dynamic_cast<CDockAreaWidget*>(d->TargetWidget.data());
+	CDockAreaWidget* DockArea = qobject_cast<CDockAreaWidget*>(d->TargetWidget.data());
 	if (!DockArea)
 	{
 		return Result;
 	}
 
-	if (DockArea->titleBarGeometry().contains(DockArea->mapFromGlobal(QCursor::pos())))
+	if (DockArea->allowedAreas().testFlag(CenterDockWidgetArea)
+	 && DockArea->titleBarGeometry().contains(DockArea->mapFromGlobal(QCursor::pos())))
 	{
 		return CenterDockWidgetArea;
 	}
 
 	return Result;
+}
+
+
+//============================================================================
+DockWidgetArea CDockOverlay::visibleDropAreaUnderCursor() const
+{
+	if (isHidden() || !d->DropPreviewEnabled)
+	{
+		return InvalidDockWidgetArea;
+	}
+	else
+	{
+		return dropAreaUnderCursor();
+	}
 }
 
 
@@ -389,7 +426,6 @@ DockWidgetArea CDockOverlay::showOverlay(QWidget* target)
 	}
 
 	d->TargetWidget = target;
-	d->TargetRect = QRect();
 	d->LastLocation = InvalidDockWidgetArea;
 
 	// Move it over the target.
@@ -408,8 +444,8 @@ void CDockOverlay::hideOverlay()
 {
 	hide();
 	d->TargetWidget.clear();
-	d->TargetRect = QRect();
 	d->LastLocation = InvalidDockWidgetArea;
+	d->DropAreaRect = QRect();
 }
 
 
@@ -418,6 +454,13 @@ void CDockOverlay::enableDropPreview(bool Enable)
 {
 	d->DropPreviewEnabled = Enable;
 	update();
+}
+
+
+//============================================================================
+bool CDockOverlay::dropPreviewEnabled() const
+{
+	return d->DropPreviewEnabled;
 }
 
 
@@ -549,7 +592,11 @@ CDockOverlayCross::CDockOverlayCross(CDockOverlay* overlay) :
 	d(new DockOverlayCrossPrivate(this))
 {
 	d->DockOverlay = overlay;
+#ifdef Q_OS_LINUX
+	setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::X11BypassWindowManagerHint);
+#else
 	setWindowFlags(Qt::Tool | Qt::FramelessWindowHint);
+#endif
 	setWindowTitle("DockOverlayCross");
 	setAttribute(Qt::WA_TranslucentBackground);
 
@@ -577,8 +624,11 @@ void CDockOverlayCross::setupOverlayCross(CDockOverlay::eMode Mode)
 	areaWidgets.insert(BottomDockWidgetArea, d->createDropIndicatorWidget(BottomDockWidgetArea, Mode));
 	areaWidgets.insert(LeftDockWidgetArea, d->createDropIndicatorWidget(LeftDockWidgetArea, Mode));
 	areaWidgets.insert(CenterDockWidgetArea, d->createDropIndicatorWidget(CenterDockWidgetArea, Mode));
+#if QT_VERSION >= 0x050600
 	d->LastDevicePixelRatio = devicePixelRatioF();
-
+#else
+    d->LastDevicePixelRatio = devicePixelRatio();
+#endif
 	setAreaWidgets(areaWidgets);
 	d->UpdateRequired = false;
 }
@@ -596,7 +646,11 @@ void CDockOverlayCross::updateOverlayIcons()
 	{
 		d->updateDropIndicatorIcon(Widget);
 	}
+#if QT_VERSION >= 0x050600
 	d->LastDevicePixelRatio = devicePixelRatioF();
+#else
+    d->LastDevicePixelRatio = devicePixelRatio();
+#endif
 }
 
 

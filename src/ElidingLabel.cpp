@@ -27,7 +27,7 @@
 //============================================================================
 //                                   INCLUDES
 //============================================================================
-#include <ElidingLabel.h>
+#include "ElidingLabel.h"
 #include <QMouseEvent>
 
 
@@ -41,6 +41,7 @@ struct ElidingLabelPrivate
 	CElidingLabel* _this;
 	Qt::TextElideMode ElideMode = Qt::ElideNone;
 	QString Text;
+	bool IsElided = false;
 
 	ElidingLabelPrivate(CElidingLabel* _public) : _this(_public) {}
 
@@ -69,6 +70,12 @@ void ElidingLabelPrivate::elideText(int Width)
     {
     	str = Text.at(0);
     }
+    bool WasElided = IsElided;
+    IsElided = str != Text;
+    if(IsElided != WasElided)
+    {
+        emit _this->elidedChanged(IsElided);
+    }
     _this->QLabel::setText(str);
 }
 
@@ -88,7 +95,7 @@ CElidingLabel::CElidingLabel(const QString& text, QWidget* parent, Qt::WindowFla
 	  d(new ElidingLabelPrivate(this))
 {
 	d->Text = text;
-	setToolTip(text);
+	internal::setToolTip(this, text);
 }
 
 
@@ -111,6 +118,12 @@ void CElidingLabel::setElideMode(Qt::TextElideMode mode)
 {
 	d->ElideMode = mode;
 	d->elideText(size().width());
+}
+
+//============================================================================
+bool CElidingLabel::isElided() const
+{
+	return d->IsElided;
 }
 
 
@@ -155,7 +168,11 @@ QSize CElidingLabel::minimumSizeHint() const
         return QLabel::minimumSizeHint();
     }
     const QFontMetrics  &fm = fontMetrics();
-    QSize size(fm.width(d->Text.left(2) + "…"), fm.height());
+    #if (QT_VERSION >= QT_VERSION_CHECK(5, 11, 0))
+        QSize size(fm.horizontalAdvance(d->Text.left(2) + "…"), fm.height());
+    #else
+        QSize size(fm.width(d->Text.left(2) + "…"), fm.height());
+    #endif
     return size;
 }
 
@@ -168,7 +185,11 @@ QSize CElidingLabel::sizeHint() const
         return QLabel::sizeHint();
     }
     const QFontMetrics& fm = fontMetrics();
-    QSize size(fm.width(d->Text), QLabel::sizeHint().height());
+    #if (QT_VERSION >= QT_VERSION_CHECK(5, 11, 0))
+        QSize size(fm.horizontalAdvance(d->Text), QLabel::sizeHint().height());
+    #else
+        QSize size(fm.width(d->Text), QLabel::sizeHint().height());
+    #endif
 	return size;
 }
 
@@ -183,7 +204,7 @@ void CElidingLabel::setText(const QString &text)
 	else
 	{
 		d->Text = text;
-		setToolTip( text );
+		internal::setToolTip(this, text);
 		d->elideText(this->size().width());
 	}
 }

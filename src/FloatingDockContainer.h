@@ -29,11 +29,19 @@
 //============================================================================
 //                                   INCLUDES
 //============================================================================
-#include <QWidget>
-
 #include "ads_globals.h"
 
-class QXmlStreamReader;
+#include <QRubberBand>
+
+#ifdef Q_OS_LINUX
+#include <QDockWidget>
+#define tFloatingWidgetBase QDockWidget
+#else
+#include <QWidget>
+#define tFloatingWidgetBase QWidget
+#endif
+
+class CDockingStateReader;
 
 namespace ads
 {
@@ -49,13 +57,49 @@ class CDockWidgetTab;
 struct DockWidgetTabPrivate;
 class CDockAreaTitleBar;
 struct DockAreaTitleBarPrivate;
+class CFloatingWidgetTitleBar;
+class CDockingStateReader;
+
+/**
+ * Pure virtual interface for floating widgets.
+ * This interface is used for opaque and non-opaque undocking. If opaque
+ * undocking is used, the a real CFloatingDockContainer widget will be created
+ */
+class IFloatingWidget
+{
+public:
+	/**
+	 * Starts floating.
+	 * This function should get called typically from a mouse press event
+	 * handler
+	 */
+	virtual void startFloating(const QPoint& DragStartMousePos, const QSize& Size,
+        eDragState DragState, QWidget* MouseEventHandler) = 0;
+
+	/**
+	 * Moves the widget to a new position relative to the position given when
+	 * startFloating() was called.
+	 * This function should be called from a mouse mouve event handler to
+	 * move the floating widget on mouse move events.
+	 */
+	virtual void moveFloating() = 0;
+
+	/**
+	 * Tells the widget that to finish dragging if the mouse is released.
+	 * This function should be called from a mouse release event handler
+	 * to finish the dragging
+	 */
+	virtual void finishDragging() = 0;
+};
+
 
 /**
  * This implements a floating widget that is a dock container that accepts
  * docking of dock widgets like the main window and that can be docked into
- * another dock container
+ * another dock container.
+ * Every floating window of the docking system is a FloatingDockContainer.
  */
-class ADS_EXPORT CFloatingDockContainer : public QWidget
+class ADS_EXPORT CFloatingDockContainer : public tFloatingWidgetBase, public IFloatingWidget
 {
 	Q_OBJECT
 private:
@@ -70,6 +114,7 @@ private:
 	friend struct DockAreaTitleBarPrivate;
 	friend class CDockWidget;
 	friend class CDockAreaWidget;
+    friend class CFloatingWidgetTitleBar;
 
 private slots:
 	void onDockAreasAddedOrRemoved();
@@ -81,16 +126,23 @@ protected:
 	 * Use moveToGlobalPos() to move the widget to a new position
 	 * depending on the start position given in Pos parameter
 	 */
-	void startFloating(const QPoint& DragStartMousePos, const QSize& Size,
-		eDragState DragState);
+	virtual void startFloating(const QPoint& DragStartMousePos, const QSize& Size,
+        eDragState DragState, QWidget* MouseEventHandler) override;
 
 	/**
 	 * Call this function to start dragging the floating widget
 	 */
-	void startDragging(const QPoint& DragStartMousePos, const QSize& Size)
+    void startDragging(const QPoint& DragStartMousePos, const QSize& Size,
+        QWidget* MouseEventHandler)
 	{
-		startFloating(DragStartMousePos, Size, DraggingFloatingWidget);
+        startFloating(DragStartMousePos, Size, DraggingFloatingWidget, MouseEventHandler);
 	}
+
+	/**
+	 * Call this function if you explicitly want to signal that dragging has
+	 * finished
+	 */
+	virtual void finishDragging() override;
 
 	/**
 	 * Call this function if you just want to initialize the position
@@ -98,14 +150,14 @@ protected:
 	 */
 	void initFloatingGeometry(const QPoint& DragStartMousePos, const QSize& Size)
 	{
-		startFloating(DragStartMousePos, Size, DraggingInactive);
+        startFloating(DragStartMousePos, Size, DraggingInactive, nullptr);
 	}
 
 	/**
 	 * Moves the widget to a new position relative to the position given when
 	 * startFloating() was called
 	 */
-	void moveFloating();
+	void moveFloating() override;
 
 	/**
 	 * Restores the state from given stream.
@@ -113,7 +165,7 @@ protected:
 	 * stream but does not restore anything. You can use this check for
 	 * faulty files before you start restoring the state
 	 */
-	bool restoreState(QXmlStreamReader& Stream, bool Testing);
+	bool restoreState(CDockingStateReader& Stream, bool Testing);
 
 	/**
 	 * Call this function to update the window title
@@ -134,7 +186,7 @@ public:
 	using Super = QWidget;
 
 	/**
-	 * Create empty flatingb widget - required for restore state
+	 * Create empty floating widget - required for restore state
 	 */
 	CFloatingDockContainer(CDockManager* DockManager);
 
